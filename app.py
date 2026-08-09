@@ -1,7 +1,7 @@
 """
 YouTube Video & MP3 Audio Downloader Flask Backend with Protected Admin Dashboard
 =================================================================================
-Powered by Flask, yt-dlp, YouTube oEmbed API, and Multi-Proxy Fallbacks for 100% uptime.
+Powered by Flask, yt-dlp, YouTube oEmbed API, and Progressive Format Fallbacks.
 """
 
 import os
@@ -59,7 +59,6 @@ tracker_lock = threading.Lock()
 
 
 def extract_youtube_id(url):
-    """Accurately extracts 11-character YouTube video ID from any link or Shorts format."""
     url = url.strip()
     if "youtu.be/" in url:
         part = url.split("youtu.be/")[1]
@@ -84,7 +83,6 @@ def extract_youtube_id(url):
 
 
 def fetch_youtube_oembed(video_id):
-    """Official YouTube oEmbed API (Never blocked by YouTube on datacenter IPs)."""
     oembed_url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json"
     try:
         req = urllib.request.Request(
@@ -94,45 +92,13 @@ def fetch_youtube_oembed(video_id):
         with urllib.request.urlopen(req, timeout=5) as resp:
             if resp.status == 200:
                 data = json.loads(resp.read().decode("utf-8"))
-                print(f"[+] YouTube oEmbed API success for video {video_id}")
                 return {
                     "title": data.get("title", "YouTube Video"),
                     "channel": data.get("author_name", "YouTube Channel"),
                     "thumbnail": data.get("thumbnail_url") or f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
                 }
     except Exception as e:
-        print("[-] YouTube oEmbed API error:", e)
-    return None
-
-
-PIPED_API_INSTANCES = [
-    "https://pipedapi.kavin.rocks",
-    "https://api.piped.yt",
-    "https://pipedapi.adminforge.de"
-]
-
-
-def fetch_piped_api_metadata(video_id):
-    for instance in PIPED_API_INSTANCES:
-        api_url = f"{instance}/streams/{video_id}"
-        try:
-            req = urllib.request.Request(
-                api_url,
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-            )
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                if resp.status == 200:
-                    data = json.loads(resp.read().decode("utf-8"))
-                    print(f"[+] Piped API success ({instance})")
-                    return {
-                        "title": data.get("title", "YouTube Video"),
-                        "channel": data.get("uploader", "YouTube Channel"),
-                        "duration": data.get("duration", 0),
-                        "views": data.get("views", 0),
-                        "thumbnail": data.get("thumbnailUrl") or f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
-                    }
-        except Exception:
-            continue
+        print("[-] oEmbed API log:", e)
     return None
 
 
@@ -174,7 +140,7 @@ def extract_with_client_fallback(url, download=False, base_opts=None):
 
     if last_error:
         raise last_error
-    raise RuntimeError("Could not extract video metadata.")
+    raise RuntimeError("Could not process request.")
 
 
 def format_bytes(bytes_num):
@@ -250,24 +216,12 @@ def get_video_info():
     duration = 0
     views = "N/A"
 
-    # 1. Primary Engine: Official YouTube oEmbed API
     oembed_data = fetch_youtube_oembed(video_id)
     if oembed_data:
         title = oembed_data["title"]
         channel = oembed_data["channel"]
         thumbnail = oembed_data["thumbnail"]
 
-    # 2. Secondary Engine: Piped API Proxy
-    piped_data = fetch_piped_api_metadata(video_id)
-    if piped_data:
-        title = piped_data.get("title", title)
-        channel = piped_data.get("channel", channel)
-        thumbnail = piped_data.get("thumbnail", thumbnail)
-        duration = piped_data.get("duration", 0)
-        v_cnt = piped_data.get("views", 0)
-        views = f"{v_cnt:,}" if v_cnt else "N/A"
-
-    # 3. Tertiary Engine: yt-dlp Client Fallbacks
     try:
         info = extract_with_client_fallback(url, download=False, base_opts={"skip_download": True})
         if info:
@@ -278,7 +232,7 @@ def get_video_info():
             v_cnt = info.get("view_count", 0)
             views = f"{v_cnt:,}" if v_cnt else views
     except Exception as e:
-        print("[-] yt-dlp info fallback info:", e)
+        print("[-] yt-dlp info log:", e)
 
     video_options = [
         {"height": 1080, "label": "1080p Full HD", "badge": "HD", "format_type": "video", "available": True},
@@ -332,8 +286,13 @@ def run_download_thread(download_id, url, is_audio, height, bitrate, ext, client
                 download_tracker[download_id].update({
                     "status": "processing",
                     "percent": 98.0,
-                    "status_msg": "Processing & Converting File..."
+                    "status_msg": "Processing & Finalizing File..."
                 })
+
+    download_success = False
+    title = "YouTube Video"
+    thumbnail = ""
+    final_path = None
 
     try:
         if is_audio:
@@ -348,39 +307,45 @@ def run_download_thread(download_id, url, is_audio, height, bitrate, ext, client
                 }],
             }
         else:
-            format_str = f"bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<={height}]+bestaudio/best[height<={height}]/best"
+            # Progressive combined MP4 stream fallback (works on servers without ffmpeg)
+            format_str = f"best[height<={height}][ext=mp4]/bestvideo[height<={height}]+bestaudio/best[height<={height}]/best[ext=mp4]/best"
             ydl_opts = {
                 "format": format_str,
                 "outtmpl": output_template,
                 "progress_hooks": [progress_hook],
-                "merge_output_format": "mp4",
             }
 
-        info = None
-        try:
-            info = extract_with_client_fallback(url, download=True, base_opts=ydl_opts)
-        except Exception as e:
-            print("[-] yt-dlp stream download log:", e)
-
-        title = info.get("title", "YouTube_Video") if info else "YouTube_Video"
-        thumbnail = info.get("thumbnail") if info else ""
+        info = extract_with_client_fallback(url, download=True, base_opts=ydl_opts)
+        if info:
+            title = info.get("title", title)
+            thumbnail = info.get("thumbnail", thumbnail)
 
         final_ext = ext if is_audio else "mp4"
         expected_filename = f"{download_id}.{final_ext}"
-        final_path = os.path.join(DOWNLOAD_DIR, expected_filename)
+        target_path = os.path.join(DOWNLOAD_DIR, expected_filename)
 
-        if not os.path.exists(final_path):
+        if os.path.exists(target_path) and os.path.getsize(target_path) > 0:
+            final_path = target_path
+            download_success = True
+        else:
             for file in os.listdir(DOWNLOAD_DIR):
                 if file.startswith(download_id):
-                    final_path = os.path.join(DOWNLOAD_DIR, file)
-                    final_ext = file.split(".")[-1]
-                    break
+                    fp = os.path.join(DOWNLOAD_DIR, file)
+                    if os.path.getsize(fp) > 0:
+                        final_path = fp
+                        final_ext = file.split(".")[-1]
+                        download_success = True
+                        break
 
+    except Exception as e:
+        print(f"[-] Download execution error for {download_id}:", e)
+
+    elapsed_sec = round(time.time() - start_timestamp, 1)
+
+    if download_success and final_path and os.path.exists(final_path):
         clean_title = "".join(c for c in title if c.isalnum() or c in (" ", "-", "_")).strip()
         download_filename = f"{clean_title}.{final_ext}"
-        file_size_bytes = os.path.getsize(final_path) if os.path.exists(final_path) else 0
-        elapsed_sec = round(time.time() - start_timestamp, 1)
-
+        file_size_bytes = os.path.getsize(final_path)
         format_label = f"MP3 ({bitrate}kbps)" if is_audio else f"Video ({height}p)"
 
         with tracker_lock:
@@ -409,13 +374,11 @@ def run_download_thread(download_id, url, is_audio, height, bitrate, ext, client
             })
             save_persistent_logs(download_history_logs)
 
-    except Exception as e:
-        print(f"[-] Download failed for {download_id}:", e)
-        elapsed_sec = round(time.time() - start_timestamp, 1)
+    else:
         with tracker_lock:
             download_tracker[download_id].update({
                 "status": "error",
-                "error_msg": f"Download failed: {str(e)}"
+                "error_msg": "Server download stream failed. Please try 720p or 360p option."
             })
             download_history_logs.append({
                 "id": download_id,
@@ -431,7 +394,7 @@ def run_download_thread(download_id, url, is_audio, height, bitrate, ext, client
                 "duration_sec": f"{elapsed_sec}s",
                 "client_ip": client_ip,
                 "status": "failed",
-                "error_detail": str(e)
+                "error_detail": "File not generated on disk"
             })
             save_persistent_logs(download_history_logs)
 
