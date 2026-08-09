@@ -1,0 +1,17 @@
+# Downloads & Local Media Cache
+downloads/
+*.mp4
+*.mp3
+*.m4a
+
+# Python Bytecode & Environment
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+.env
+
+# System Files
+.DS_Store
+Thumbs.db
