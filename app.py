@@ -1,7 +1,7 @@
 """
 YouTube Video & MP3 Audio Downloader Flask Backend with Protected Admin Dashboard
 =================================================================================
-Powered by Flask, yt-dlp, and Invidious API Proxy Fallback for 100% uptime on cloud servers.
+Powered by Flask, yt-dlp, and Piped + Invidious API Proxy Fallbacks for 100% cloud uptime.
 """
 
 import os
@@ -57,20 +57,26 @@ download_tracker = {}
 download_history_logs = load_persistent_logs()
 tracker_lock = threading.Lock()
 
-# Public Invidious API Instance proxies for bypassing datacenter IP blocks
+# Public Piped API & Invidious API Endpoints
+PIPED_API_INSTANCES = [
+    "https://pipedapi.kavin.rocks",
+    "https://api.piped.yt",
+    "https://pipedapi.adminforge.de",
+    "https://piped-api.garudalinux.org"
+]
+
 INVIDIOUS_API_INSTANCES = [
     "https://invidious.nerdvpn.de",
     "https://inv.tux.pizza",
     "https://invidious.drgns.space",
-    "https://vid.puffyan.us",
-    "https://invidious.fi"
+    "https://vid.puffyan.us"
 ]
 
 
 def extract_youtube_id(url):
     """Extracts 11-character YouTube video ID from any URL format."""
     patterns = [
-        r"(?:v=|\/)([0-9A-Za-z_-]{11}).*",
+        r"(?:v=|\/)([0-9A-Za-z_-]{11})",
         r"youtu\.be\/([0-9A-Za-z_-]{11})",
         r"shorts\/([0-9A-Za-z_-]{11})"
     ]
@@ -81,25 +87,48 @@ def extract_youtube_id(url):
     return None
 
 
-def fetch_invidious_api_metadata(video_id):
-    """Fallback metadata fetcher via Invidious API when yt-dlp is blocked by YouTube bot checks."""
-    for instance in INVIDIOUS_API_INSTANCES:
-        api_url = f"{instance}/api/v1/videos/{video_id}"
+def fetch_piped_api_metadata(video_id):
+    """Fetches video metadata via Piped API proxy."""
+    for instance in PIPED_API_INSTANCES:
+        api_url = f"{instance}/streams/{video_id}"
         try:
             req = urllib.request.Request(
                 api_url,
                 headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
                     "Accept": "application/json"
                 }
             )
             with urllib.request.urlopen(req, timeout=5) as resp:
                 if resp.status == 200:
                     data = json.loads(resp.read().decode("utf-8"))
-                    print(f"[+] Successfully fetched metadata via Invidious API proxy ({instance})")
+                    print(f"[+] Piped API proxy success ({instance})")
                     return data
         except Exception as e:
-            print(f"[-] Invidious proxy instance {instance} error:", e)
+            print(f"[-] Piped instance {instance} failed:", e)
+            continue
+    return None
+
+
+def fetch_invidious_api_metadata(video_id):
+    """Fetches video metadata via Invidious API proxy."""
+    for instance in INVIDIOUS_API_INSTANCES:
+        api_url = f"{instance}/api/v1/videos/{video_id}"
+        try:
+            req = urllib.request.Request(
+                api_url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                    "Accept": "application/json"
+                }
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                if resp.status == 200:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    print(f"[+] Invidious API proxy success ({instance})")
+                    return data
+        except Exception as e:
+            print(f"[-] Invidious instance {instance} failed:", e)
             continue
     return None
 
@@ -211,13 +240,47 @@ def get_video_info():
     video_id = extract_youtube_id(url)
     info = None
 
-    # Try yt-dlp extraction first
+    # 1. Primary: yt-dlp Extraction
     try:
         info = extract_with_client_fallback(url, download=False, base_opts={"skip_download": True})
     except Exception as e:
-        print("[-] yt-dlp failed, attempting Invidious API Proxy fallback:", e)
+        print("[-] yt-dlp extraction failed, activating API proxy fallbacks:", e)
 
-    # Invidious Proxy Fallback if yt-dlp is blocked on cloud IP
+    # 2. Fallback A: Piped API Proxy
+    if not info and video_id:
+        piped_data = fetch_piped_api_metadata(video_id)
+        if piped_data:
+            title = piped_data.get("title", "YouTube Video")
+            duration = piped_data.get("duration", 0)
+            channel = piped_data.get("uploader", "YouTube Channel")
+            view_count = piped_data.get("views", 0)
+            thumbnail = piped_data.get("thumbnailUrl") or f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+
+            video_options = [
+                {"height": 1080, "label": "1080p Full HD", "badge": "HD", "format_type": "video", "available": True},
+                {"height": 720, "label": "720p HD", "badge": "HD", "format_type": "video", "available": True},
+                {"height": 480, "label": "480p SD", "badge": "SD", "format_type": "video", "available": True},
+                {"height": 360, "label": "360p", "badge": "SD", "format_type": "video", "available": True}
+            ]
+            audio_options = [
+                {"id": "mp3_320", "label": "MP3 Audio (High Quality 320kbps)", "badge": "HQ MP3", "format_type": "audio", "ext": "mp3", "bitrate": "320"},
+                {"id": "mp3_192", "label": "MP3 Audio (Standard 192kbps)", "badge": "MP3", "format_type": "audio", "ext": "mp3", "bitrate": "192"},
+                {"id": "m4a", "label": "M4A Audio (AAC)", "badge": "M4A", "format_type": "audio", "ext": "m4a", "bitrate": "128"}
+            ]
+
+            return jsonify({
+                "success": True,
+                "url": f"https://www.youtube.com/watch?v={video_id}",
+                "title": title,
+                "thumbnail": thumbnail,
+                "duration": format_seconds(duration),
+                "channel": channel,
+                "views": f"{view_count:,}" if view_count else "N/A",
+                "video_options": video_options,
+                "audio_options": audio_options
+            })
+
+    # 3. Fallback B: Invidious API Proxy
     if not info and video_id:
         inv_data = fetch_invidious_api_metadata(video_id)
         if inv_data:
@@ -253,7 +316,7 @@ def get_video_info():
             })
 
     if not info:
-        return jsonify({"error": "YouTube bot verification encountered. Please try a different YouTube link or try again in a moment."}), 400
+        return jsonify({"error": "Failed to parse YouTube link. Please check your URL and try again."}), 400
 
     title = info.get("title", "YouTube Video")
     thumbnail = info.get("thumbnail") or (info.get("thumbnails")[-1]["url"] if info.get("thumbnails") else "")
@@ -359,9 +422,9 @@ def run_download_thread(download_id, url, is_audio, height, bitrate, ext, client
         try:
             info = extract_with_client_fallback(url, download=True, base_opts=ydl_opts)
         except Exception as e:
-            print("[-] yt-dlp download failed, attempting proxy stream fallback:", e)
+            print("[-] yt-dlp direct stream download error:", e)
 
-        title = info.get("title", "download") if info else "YouTube_Video"
+        title = info.get("title", "YouTube_Video") if info else "YouTube_Video"
         thumbnail = info.get("thumbnail") if info else ""
 
         final_ext = ext if is_audio else "mp4"
