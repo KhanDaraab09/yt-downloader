@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Admin Dashboard - CyberTube AI System Metrics & Download Logs</title>
+  <meta name="description" content="Private Admin Dashboard for monitoring system load, server disk usage, active downloads, and video/MP3 extraction history logs.">
+  
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="dark-theme">
+  <div class="ambient-background">
+    <div class="glow-orb orb-cyan"></div>
+    <div class="glow-orb orb-red"></div>
+    <div class="glow-orb orb-violet"></div>
+  </div>
+
+  <div class="app-container admin-container">
+    
+    <!-- Top Admin Header -->
+    <header class="top-nav glass-panel admin-header">
+      <div class="brand">
+        <div class="brand-logo admin-logo">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+          </svg>
+        </div>
+        <div class="brand-title">
+          <span class="title-main">System Admin <span class="badge-cyan">DASHBOARD</span></span>
+          <span class="title-sub">Server Metrics & Download History Logs</span>
+        </div>
+      </div>
+      <div class="admin-top-actions">
+        <span class="status-pill"><span class="pulse-dot"></span> Uptime: <strong id="serverUptime">--</strong></span>
+        <a href="/" class="btn glass-btn-sm" title="Back to Downloader App">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="19" y1="12" x2="5" y2="12"></line>
+            <polyline points="12 19 5 12 12 5"></polyline>
+          </svg>
+          Main App
+        </a>
+        <a href="/admin/logout" class="btn glass-btn-sm danger" title="Logout from Admin Dashboard">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+            <polyline points="16 17 21 12 16 7"></polyline>
+            <line x1="21" y1="12" x2="9" y2="12"></line>
+          </svg>
+          Logout
+        </a>
+      </div>
+    </header>
+
+    <main class="main-content">
+      
+      <!-- Metrics Overview Cards Grid -->
+      <section class="metrics-grid">
+        
+        <!-- Disk Storage Metric Card -->
+        <div class="metric-card glass-panel">
+          <div class="metric-icon cyan">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
+              <rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect>
+              <line x1="6" y1="6" x2="6.01" y2="6"></line>
+              <line x1="6" y1="18" x2="6.01" y2="18"></line>
+            </svg>
+          </div>
+          <div class="metric-info">
+            <span class="metric-label">Server Disk Storage</span>
+            <span id="diskUsedVal" class="metric-val">0 GB / 0 GB</span>
+            <div class="metric-bar-track">
+              <div id="diskBarFill" class="metric-bar-fill cyan" style="width: 0%;"></div>
+            </div>
+            <span id="diskFreeSub" class="metric-sub">0 GB Free Space</span>
+          </div>
+        </div>
+
+        <!-- Active Streams Card -->
+        <div class="metric-card glass-panel">
+          <div class="metric-icon red">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path>
+            </svg>
+          </div>
+          <div class="metric-info">
+            <span class="metric-label">Active Downloads</span>
+            <span id="activeDownloadsVal" class="metric-val">0 Streams</span>
+            <span id="activeSub" class="metric-sub">Background Threads</span>
+          </div>
+        </div>
+
+        <!-- Total Downloads Processed Card -->
+        <div class="metric-card glass-panel">
+          <div class="metric-icon green">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+            </svg>
+          </div>
+          <div class="metric-info">
+            <span class="metric-label">Total Downloads</span>
+            <span id="totalDownloadsVal" class="metric-val">0 Files</span>
+            <span id="totalSub" class="metric-sub">0 Video &bull; 0 MP3</span>
+          </div>
+        </div>
+
+        <!-- Server File Cache Card -->
+        <div class="metric-card glass-panel">
+          <div class="metric-icon violet">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+              <polyline points="10 9 15 4 20 9"></polyline>
+              <line x1="15" y1="4" x2="15" y2="16"></line>
+            </svg>
+          </div>
+          <div class="metric-info">
+            <span class="metric-label">Server File Cache</span>
+            <span id="cacheSizeVal" class="metric-val">0 MB</span>
+            <span id="cacheFilesSub" class="metric-sub">0 Files Cached</span>
+          </div>
+        </div>
+
+      </section>
+
+      <!-- Control Toolbar & Filter Bar -->
+      <section class="admin-controls-card glass-panel">
+        <div class="admin-controls-header">
+          <div class="controls-title-group">
+            <h2 class="section-title">Download Logs & History</h2>
+            <span id="logCountBadge" class="count-badge">0 Logs</span>
+          </div>
+
+          <div class="controls-btn-group">
+            <button type="button" id="btnAutoRefresh" class="glass-btn-sm active" title="Toggle 5-second live auto refresh">
+              <span class="pulse-dot"></span> Auto Refresh: ON
+            </button>
+            <button type="button" id="btnManualRefresh" class="glass-btn-sm" title="Refresh logs manually">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="23 4 23 10 17 10"></polyline>
+                <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+              </svg>
+              Refresh
+            </button>
+            <button type="button" id="btnClearCache" class="glass-btn-sm danger" title="Clear all cached files from server disk">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="3 6 5 6 21 6"></polyline>
+                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+              </svg>
+              Clear Cache
+            </button>
+            <button type="button" id="btnClearLogs" class="glass-btn-sm danger" title="Clear all download history logs permanently">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M3 6h18"></path>
+                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"></path>
+              </svg>
+              Clear Logs
+            </button>
+          </div>
+        </div>
+
+        <!-- Filter Pills -->
+        <div class="log-filter-row">
+          <button type="button" class="filter-chip active" data-filter="all">All Logs</button>
+          <button type="button" class="filter-chip" data-filter="completed">Completed</button>
+          <button type="button" class="filter-chip" data-filter="audio">MP3 Audio</button>
+          <button type="button" class="filter-chip" data-filter="video">Video MP4</button>
+          <button type="button" class="filter-chip" data-filter="failed">Failed</button>
+        </div>
+      </section>
+
+      <!-- Logs Table & Card Container -->
+      <section class="logs-container glass-panel">
+        <div class="table-responsive">
+          <table class="logs-table">
+            <thead>
+              <tr>
+                <th>Time & Date</th>
+                <th>Video Title</th>
+                <th>Format Quality</th>
+                <th>File Size</th>
+                <th>Duration</th>
+                <th>Status</th>
+                <th>Client IP</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody id="logsTableBody">
+              <!-- Logs populated dynamically by JS -->
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Empty State -->
+        <div id="logsEmptyState" class="empty-state hidden">
+          <div class="empty-icon">📂</div>
+          <h3>No Download Logs Recorded</h3>
+          <p>Download logs will appear here in real-time as users convert videos and MP3 files.</p>
+        </div>
+      </section>
+
+    </main>
+
+    <!-- Glowing Glass Developer Credit Footer -->
+    <footer class="footer-glass glass-panel">
+      <p class="credit-text">
+        Created &amp; Developed by <span class="developer-glow">DARAAB KHAN</span>
+      </p>
+    </footer>
+
+  </div>
+
+  <script src="/static/admin.js"></script>
+</body>
+</html>
