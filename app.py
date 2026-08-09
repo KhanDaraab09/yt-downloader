@@ -58,6 +58,21 @@ download_tracker = {}
 download_history_logs = load_persistent_logs()
 tracker_lock = threading.Lock()
 
+# Common yt-dlp Options for Bypassing YouTube Datacenter Bot Verification
+YTDLP_COMMON_OPTS = {
+    "quiet": True,
+    "no_warnings": True,
+    "nocheckcertificate": True,
+    "geo_bypass": True,
+    "user_agent": "com.google.android.youtube/19.29.37 (Linux; U; Android 11; en_US) gzip",
+    "extractor_args": {
+        "youtube": {
+            "player_client": ["android", "web"],
+            "player_skip": ["webpage", "configs"],
+        }
+    },
+}
+
 
 def format_bytes(bytes_num):
     if not bytes_num:
@@ -123,8 +138,7 @@ def get_video_info():
         return jsonify({"error": "Please provide a valid YouTube URL"}), 400
 
     ydl_opts = {
-        "quiet": True,
-        "no_warnings": True,
+        **YTDLP_COMMON_OPTS,
         "extract_flat": False,
         "skip_download": True,
     }
@@ -207,7 +221,7 @@ def get_video_info():
 
     except Exception as e:
         print("[-] yt-dlp error:", e)
-        return jsonify({"error": f"Failed to parse video link. Please verify URL: {str(e)}"}), 400
+        return jsonify({"error": f"Failed to parse video link: {str(e)}"}), 400
 
 
 def run_download_thread(download_id, url, is_audio, height, bitrate, ext, client_ip):
@@ -243,11 +257,10 @@ def run_download_thread(download_id, url, is_audio, height, bitrate, ext, client
     try:
         if is_audio:
             ydl_opts = {
+                **YTDLP_COMMON_OPTS,
                 "format": "bestaudio/best",
                 "outtmpl": output_template,
                 "progress_hooks": [progress_hook],
-                "quiet": True,
-                "no_warnings": True,
                 "postprocessors": [{
                     "key": "FFmpegExtractAudio",
                     "preferredcodec": "mp3" if ext == "mp3" else "m4a",
@@ -257,12 +270,11 @@ def run_download_thread(download_id, url, is_audio, height, bitrate, ext, client
         else:
             format_str = f"bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<={height}]+bestaudio/best[height<={height}]/best"
             ydl_opts = {
+                **YTDLP_COMMON_OPTS,
                 "format": format_str,
                 "outtmpl": output_template,
                 "progress_hooks": [progress_hook],
                 "merge_output_format": "mp4",
-                "quiet": True,
-                "no_warnings": True,
             }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -297,7 +309,6 @@ def run_download_thread(download_id, url, is_audio, height, bitrate, ext, client
                 "status_msg": "Download Ready!"
             })
 
-            # Append to Permanent History Log Record
             download_history_logs.append({
                 "id": download_id,
                 "title": title,
@@ -510,5 +521,5 @@ def delete_log_entry(download_id):
 
 
 if __name__ == "__main__":
-    print("[+] Starting YouTube Video & MP3 Downloader Server with Permanent Log Persistence on http://localhost:5000...")
+    print("[+] Starting YouTube Video & MP3 Downloader Server on http://localhost:5000...")
     app.run(host="0.0.0.0", port=5000, debug=True)
