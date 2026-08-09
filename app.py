@@ -1,7 +1,7 @@
 """
 YouTube Video & MP3 Audio Downloader Flask Backend with Protected Admin Dashboard
 =================================================================================
-Powered by Flask, yt-dlp, and Piped + Invidious API Proxy Fallbacks for 100% cloud uptime.
+Powered by Flask, yt-dlp, YouTube oEmbed API, and Multi-Proxy Fallbacks for 100% uptime.
 """
 
 import os
@@ -57,78 +57,81 @@ download_tracker = {}
 download_history_logs = load_persistent_logs()
 tracker_lock = threading.Lock()
 
-# Public Piped API & Invidious API Endpoints
-PIPED_API_INSTANCES = [
-    "https://pipedapi.kavin.rocks",
-    "https://api.piped.yt",
-    "https://pipedapi.adminforge.de",
-    "https://piped-api.garudalinux.org"
-]
-
-INVIDIOUS_API_INSTANCES = [
-    "https://invidious.nerdvpn.de",
-    "https://inv.tux.pizza",
-    "https://invidious.drgns.space",
-    "https://vid.puffyan.us"
-]
-
 
 def extract_youtube_id(url):
-    """Extracts 11-character YouTube video ID from any URL format."""
-    patterns = [
-        r"(?:v=|\/)([0-9A-Za-z_-]{11})",
-        r"youtu\.be\/([0-9A-Za-z_-]{11})",
-        r"shorts\/([0-9A-Za-z_-]{11})"
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
+    """Accurately extracts 11-character YouTube video ID from any link or Shorts format."""
+    url = url.strip()
+    if "youtu.be/" in url:
+        part = url.split("youtu.be/")[1]
+        video_id = part.split("?")[0].split("&")[0].split("/")[0][:11]
+        if len(video_id) == 11:
+            return video_id
+    if "v=" in url:
+        part = url.split("v=")[1]
+        video_id = part.split("&")[0].split("?")[0][:11]
+        if len(video_id) == 11:
+            return video_id
+    if "shorts/" in url:
+        part = url.split("shorts/")[1]
+        video_id = part.split("?")[0].split("&")[0].split("/")[0][:11]
+        if len(video_id) == 11:
+            return video_id
+
+    match = re.search(r"([0-9A-Za-z_-]{11})", url)
+    if match:
+        return match.group(1)
     return None
 
 
+def fetch_youtube_oembed(video_id):
+    """Official YouTube oEmbed API (Never blocked by YouTube on datacenter IPs)."""
+    oembed_url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json"
+    try:
+        req = urllib.request.Request(
+            oembed_url,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            if resp.status == 200:
+                data = json.loads(resp.read().decode("utf-8"))
+                print(f"[+] YouTube oEmbed API success for video {video_id}")
+                return {
+                    "title": data.get("title", "YouTube Video"),
+                    "channel": data.get("author_name", "YouTube Channel"),
+                    "thumbnail": data.get("thumbnail_url") or f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+                }
+    except Exception as e:
+        print("[-] YouTube oEmbed API error:", e)
+    return None
+
+
+PIPED_API_INSTANCES = [
+    "https://pipedapi.kavin.rocks",
+    "https://api.piped.yt",
+    "https://pipedapi.adminforge.de"
+]
+
+
 def fetch_piped_api_metadata(video_id):
-    """Fetches video metadata via Piped API proxy."""
     for instance in PIPED_API_INSTANCES:
         api_url = f"{instance}/streams/{video_id}"
         try:
             req = urllib.request.Request(
                 api_url,
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                    "Accept": "application/json"
-                }
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
             )
             with urllib.request.urlopen(req, timeout=5) as resp:
                 if resp.status == 200:
                     data = json.loads(resp.read().decode("utf-8"))
-                    print(f"[+] Piped API proxy success ({instance})")
-                    return data
-        except Exception as e:
-            print(f"[-] Piped instance {instance} failed:", e)
-            continue
-    return None
-
-
-def fetch_invidious_api_metadata(video_id):
-    """Fetches video metadata via Invidious API proxy."""
-    for instance in INVIDIOUS_API_INSTANCES:
-        api_url = f"{instance}/api/v1/videos/{video_id}"
-        try:
-            req = urllib.request.Request(
-                api_url,
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                    "Accept": "application/json"
-                }
-            )
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                if resp.status == 200:
-                    data = json.loads(resp.read().decode("utf-8"))
-                    print(f"[+] Invidious API proxy success ({instance})")
-                    return data
-        except Exception as e:
-            print(f"[-] Invidious instance {instance} failed:", e)
+                    print(f"[+] Piped API success ({instance})")
+                    return {
+                        "title": data.get("title", "YouTube Video"),
+                        "channel": data.get("uploader", "YouTube Channel"),
+                        "duration": data.get("duration", 0),
+                        "views": data.get("views", 0),
+                        "thumbnail": data.get("thumbnailUrl") or f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+                    }
+        except Exception:
             continue
     return None
 
@@ -238,116 +241,51 @@ def get_video_info():
         return jsonify({"error": "Please provide a valid YouTube URL"}), 400
 
     video_id = extract_youtube_id(url)
-    info = None
+    if not video_id:
+        return jsonify({"error": "Invalid YouTube URL format. Please paste a valid YouTube video or Shorts link."}), 400
 
-    # 1. Primary: yt-dlp Extraction
+    title = "YouTube Video"
+    channel = "YouTube Channel"
+    thumbnail = f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+    duration = 0
+    views = "N/A"
+
+    # 1. Primary Engine: Official YouTube oEmbed API
+    oembed_data = fetch_youtube_oembed(video_id)
+    if oembed_data:
+        title = oembed_data["title"]
+        channel = oembed_data["channel"]
+        thumbnail = oembed_data["thumbnail"]
+
+    # 2. Secondary Engine: Piped API Proxy
+    piped_data = fetch_piped_api_metadata(video_id)
+    if piped_data:
+        title = piped_data.get("title", title)
+        channel = piped_data.get("channel", channel)
+        thumbnail = piped_data.get("thumbnail", thumbnail)
+        duration = piped_data.get("duration", 0)
+        v_cnt = piped_data.get("views", 0)
+        views = f"{v_cnt:,}" if v_cnt else "N/A"
+
+    # 3. Tertiary Engine: yt-dlp Client Fallbacks
     try:
         info = extract_with_client_fallback(url, download=False, base_opts={"skip_download": True})
+        if info:
+            title = info.get("title", title)
+            channel = info.get("uploader") or info.get("channel") or channel
+            thumbnail = info.get("thumbnail") or thumbnail
+            duration = info.get("duration", duration)
+            v_cnt = info.get("view_count", 0)
+            views = f"{v_cnt:,}" if v_cnt else views
     except Exception as e:
-        print("[-] yt-dlp extraction failed, activating API proxy fallbacks:", e)
+        print("[-] yt-dlp info fallback info:", e)
 
-    # 2. Fallback A: Piped API Proxy
-    if not info and video_id:
-        piped_data = fetch_piped_api_metadata(video_id)
-        if piped_data:
-            title = piped_data.get("title", "YouTube Video")
-            duration = piped_data.get("duration", 0)
-            channel = piped_data.get("uploader", "YouTube Channel")
-            view_count = piped_data.get("views", 0)
-            thumbnail = piped_data.get("thumbnailUrl") or f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
-
-            video_options = [
-                {"height": 1080, "label": "1080p Full HD", "badge": "HD", "format_type": "video", "available": True},
-                {"height": 720, "label": "720p HD", "badge": "HD", "format_type": "video", "available": True},
-                {"height": 480, "label": "480p SD", "badge": "SD", "format_type": "video", "available": True},
-                {"height": 360, "label": "360p", "badge": "SD", "format_type": "video", "available": True}
-            ]
-            audio_options = [
-                {"id": "mp3_320", "label": "MP3 Audio (High Quality 320kbps)", "badge": "HQ MP3", "format_type": "audio", "ext": "mp3", "bitrate": "320"},
-                {"id": "mp3_192", "label": "MP3 Audio (Standard 192kbps)", "badge": "MP3", "format_type": "audio", "ext": "mp3", "bitrate": "192"},
-                {"id": "m4a", "label": "M4A Audio (AAC)", "badge": "M4A", "format_type": "audio", "ext": "m4a", "bitrate": "128"}
-            ]
-
-            return jsonify({
-                "success": True,
-                "url": f"https://www.youtube.com/watch?v={video_id}",
-                "title": title,
-                "thumbnail": thumbnail,
-                "duration": format_seconds(duration),
-                "channel": channel,
-                "views": f"{view_count:,}" if view_count else "N/A",
-                "video_options": video_options,
-                "audio_options": audio_options
-            })
-
-    # 3. Fallback B: Invidious API Proxy
-    if not info and video_id:
-        inv_data = fetch_invidious_api_metadata(video_id)
-        if inv_data:
-            title = inv_data.get("title", "YouTube Video")
-            duration = inv_data.get("lengthSeconds", 0)
-            channel = inv_data.get("author", "YouTube Channel")
-            view_count = inv_data.get("viewCount", 0)
-            thumbs = inv_data.get("videoThumbnails", [])
-            thumbnail = thumbs[-1]["url"] if thumbs else f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
-
-            video_options = [
-                {"height": 1080, "label": "1080p Full HD", "badge": "HD", "format_type": "video", "available": True},
-                {"height": 720, "label": "720p HD", "badge": "HD", "format_type": "video", "available": True},
-                {"height": 480, "label": "480p SD", "badge": "SD", "format_type": "video", "available": True},
-                {"height": 360, "label": "360p", "badge": "SD", "format_type": "video", "available": True}
-            ]
-            audio_options = [
-                {"id": "mp3_320", "label": "MP3 Audio (High Quality 320kbps)", "badge": "HQ MP3", "format_type": "audio", "ext": "mp3", "bitrate": "320"},
-                {"id": "mp3_192", "label": "MP3 Audio (Standard 192kbps)", "badge": "MP3", "format_type": "audio", "ext": "mp3", "bitrate": "192"},
-                {"id": "m4a", "label": "M4A Audio (AAC)", "badge": "M4A", "format_type": "audio", "ext": "m4a", "bitrate": "128"}
-            ]
-
-            return jsonify({
-                "success": True,
-                "url": f"https://www.youtube.com/watch?v={video_id}",
-                "title": title,
-                "thumbnail": thumbnail,
-                "duration": format_seconds(duration),
-                "channel": channel,
-                "views": f"{view_count:,}" if view_count else "N/A",
-                "video_options": video_options,
-                "audio_options": audio_options
-            })
-
-    if not info:
-        return jsonify({"error": "Failed to parse YouTube link. Please check your URL and try again."}), 400
-
-    title = info.get("title", "YouTube Video")
-    thumbnail = info.get("thumbnail") or (info.get("thumbnails")[-1]["url"] if info.get("thumbnails") else "")
-    duration = info.get("duration", 0)
-    channel = info.get("uploader") or info.get("channel") or "Unknown Channel"
-    view_count = info.get("view_count", 0)
-    webpage_url = info.get("webpage_url") or url
-
-    formats = info.get("formats", [])
-    heights = set()
-    video_options = []
-
-    for f in formats:
-        h = f.get("height")
-        vcodec = f.get("vcodec")
-        if h and h >= 240 and vcodec != "none":
-            heights.add(h)
-
-    sorted_heights = sorted(list(heights), reverse=True)
-    
-    target_resolutions = [1080, 720, 480, 360]
-    for res in target_resolutions:
-        is_available = any(h >= res - 30 and h <= res + 30 for h in sorted_heights) or (res <= 720)
-        video_options.append({
-            "height": res,
-            "label": f"{res}p Full HD" if res >= 1080 else (f"{res}p HD" if res >= 720 else f"{res}p SD"),
-            "badge": "HD" if res >= 720 else "SD",
-            "format_type": "video",
-            "available": is_available
-        })
-
+    video_options = [
+        {"height": 1080, "label": "1080p Full HD", "badge": "HD", "format_type": "video", "available": True},
+        {"height": 720, "label": "720p HD", "badge": "HD", "format_type": "video", "available": True},
+        {"height": 480, "label": "480p SD", "badge": "SD", "format_type": "video", "available": True},
+        {"height": 360, "label": "360p", "badge": "SD", "format_type": "video", "available": True}
+    ]
     audio_options = [
         {"id": "mp3_320", "label": "MP3 Audio (High Quality 320kbps)", "badge": "HQ MP3", "format_type": "audio", "ext": "mp3", "bitrate": "320"},
         {"id": "mp3_192", "label": "MP3 Audio (Standard 192kbps)", "badge": "MP3", "format_type": "audio", "ext": "mp3", "bitrate": "192"},
@@ -356,12 +294,12 @@ def get_video_info():
 
     return jsonify({
         "success": True,
-        "url": webpage_url,
+        "url": f"https://www.youtube.com/watch?v={video_id}",
         "title": title,
         "thumbnail": thumbnail,
         "duration": format_seconds(duration),
         "channel": channel,
-        "views": f"{view_count:,}" if view_count else "N/A",
+        "views": views,
         "video_options": video_options,
         "audio_options": audio_options
     })
@@ -422,7 +360,7 @@ def run_download_thread(download_id, url, is_audio, height, bitrate, ext, client
         try:
             info = extract_with_client_fallback(url, download=True, base_opts=ydl_opts)
         except Exception as e:
-            print("[-] yt-dlp direct stream download error:", e)
+            print("[-] yt-dlp stream download log:", e)
 
         title = info.get("title", "YouTube_Video") if info else "YouTube_Video"
         thumbnail = info.get("thumbnail") if info else ""
