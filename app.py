@@ -58,20 +58,48 @@ download_tracker = {}
 download_history_logs = load_persistent_logs()
 tracker_lock = threading.Lock()
 
-# Common yt-dlp Options for Bypassing YouTube Datacenter Bot Verification
-YTDLP_COMMON_OPTS = {
-    "quiet": True,
-    "no_warnings": True,
-    "nocheckcertificate": True,
-    "geo_bypass": True,
-    "user_agent": "com.google.android.youtube/19.29.37 (Linux; U; Android 11; en_US) gzip",
-    "extractor_args": {
-        "youtube": {
-            "player_client": ["android", "web"],
-            "player_skip": ["webpage", "configs"],
+# Multi-client Player Fallback list to bypass YouTube Cloud IP bot verification
+CLIENT_FALLBACKS = [
+    ["ios"],
+    ["mweb"],
+    ["android"],
+    ["tv"],
+    ["web"]
+]
+
+
+def extract_with_client_fallback(url, download=False, base_opts=None):
+    """Tries extracting info across multiple YouTube player client signatures (ios -> mweb -> android -> tv)."""
+    if base_opts is None:
+        base_opts = {}
+
+    last_error = None
+    for client in CLIENT_FALLBACKS:
+        opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "nocheckcertificate": True,
+            "geo_bypass": True,
+            "extractor_args": {
+                "youtube": {
+                    "player_client": client
+                }
+            },
+            **base_opts
         }
-    },
-}
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                res = ydl.extract_info(url, download=download)
+                if res:
+                    return res
+        except Exception as e:
+            print(f"[-] Client {client} attempt failed: {e}")
+            last_error = e
+            continue
+
+    if last_error:
+        raise last_error
+    raise RuntimeError("Could not extract video metadata from any client.")
 
 
 def format_bytes(bytes_num):
@@ -137,91 +165,85 @@ def get_video_info():
     if not url:
         return jsonify({"error": "Please provide a valid YouTube URL"}), 400
 
-    ydl_opts = {
-        **YTDLP_COMMON_OPTS,
-        "extract_flat": False,
-        "skip_download": True,
-    }
-
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            
-            if not info:
-                return jsonify({"error": "Could not extract video metadata"}), 400
+        info = extract_with_client_fallback(url, download=False, base_opts={"skip_download": True})
+        
+        if not info:
+            return jsonify({"error": "Could not extract video metadata"}), 400
 
-            title = info.get("title", "YouTube Video")
-            thumbnail = info.get("thumbnail") or (info.get("thumbnails")[-1]["url"] if info.get("thumbnails") else "")
-            duration = info.get("duration", 0)
-            channel = info.get("uploader") or info.get("channel") or "Unknown Channel"
-            view_count = info.get("view_count", 0)
-            webpage_url = info.get("webpage_url") or url
+        title = info.get("title", "YouTube Video")
+        thumbnail = info.get("thumbnail") or (info.get("thumbnails")[-1]["url"] if info.get("thumbnails") else "")
+        duration = info.get("duration", 0)
+        channel = info.get("uploader") or info.get("channel") or "Unknown Channel"
+        view_count = info.get("view_count", 0)
+        webpage_url = info.get("webpage_url") or url
 
-            formats = info.get("formats", [])
-            heights = set()
-            video_options = []
+        formats = info.get("formats", [])
+        heights = set()
+        video_options = []
 
-            for f in formats:
-                h = f.get("height")
-                vcodec = f.get("vcodec")
-                if h and h >= 240 and vcodec != "none":
-                    heights.add(h)
+        for f in formats:
+            h = f.get("height")
+            vcodec = f.get("vcodec")
+            if h and h >= 240 and vcodec != "none":
+                heights.add(h)
 
-            sorted_heights = sorted(list(heights), reverse=True)
-            
-            target_resolutions = [1080, 720, 480, 360]
-            for res in target_resolutions:
-                is_available = any(h >= res - 30 and h <= res + 30 for h in sorted_heights) or (res <= 720)
-                video_options.append({
-                    "height": res,
-                    "label": f"{res}p Full HD" if res >= 1080 else (f"{res}p HD" if res >= 720 else f"{res}p SD"),
-                    "badge": "HD" if res >= 720 else "SD",
-                    "format_type": "video",
-                    "available": is_available
-                })
-
-            audio_options = [
-                {
-                    "id": "mp3_320",
-                    "label": "MP3 Audio (High Quality 320kbps)",
-                    "badge": "HQ MP3",
-                    "format_type": "audio",
-                    "ext": "mp3",
-                    "bitrate": "320"
-                },
-                {
-                    "id": "mp3_192",
-                    "label": "MP3 Audio (Standard 192kbps)",
-                    "badge": "MP3",
-                    "format_type": "audio",
-                    "ext": "mp3",
-                    "bitrate": "192"
-                },
-                {
-                    "id": "m4a",
-                    "label": "M4A Audio (AAC)",
-                    "badge": "M4A",
-                    "format_type": "audio",
-                    "ext": "m4a",
-                    "bitrate": "128"
-                }
-            ]
-
-            return jsonify({
-                "success": True,
-                "url": webpage_url,
-                "title": title,
-                "thumbnail": thumbnail,
-                "duration": format_seconds(duration),
-                "channel": channel,
-                "views": f"{view_count:,}" if view_count else "N/A",
-                "video_options": video_options,
-                "audio_options": audio_options
+        sorted_heights = sorted(list(heights), reverse=True)
+        
+        target_resolutions = [1080, 720, 480, 360]
+        for res in target_resolutions:
+            is_available = any(h >= res - 30 and h <= res + 30 for h in sorted_heights) or (res <= 720)
+            video_options.append({
+                "height": res,
+                "label": f"{res}p Full HD" if res >= 1080 else (f"{res}p HD" if res >= 720 else f"{res}p SD"),
+                "badge": "HD" if res >= 720 else "SD",
+                "format_type": "video",
+                "available": is_available
             })
+
+        audio_options = [
+            {
+                "id": "mp3_320",
+                "label": "MP3 Audio (High Quality 320kbps)",
+                "badge": "HQ MP3",
+                "format_type": "audio",
+                "ext": "mp3",
+                "bitrate": "320"
+            },
+            {
+                "id": "mp3_192",
+                "label": "MP3 Audio (Standard 192kbps)",
+                "badge": "MP3",
+                "format_type": "audio",
+                "ext": "mp3",
+                "bitrate": "192"
+            },
+            {
+                "id": "m4a",
+                "label": "M4A Audio (AAC)",
+                "badge": "M4A",
+                "format_type": "audio",
+                "ext": "m4a",
+                "bitrate": "128"
+            }
+        ]
+
+        return jsonify({
+            "success": True,
+            "url": webpage_url,
+            "title": title,
+            "thumbnail": thumbnail,
+            "duration": format_seconds(duration),
+            "channel": channel,
+            "views": f"{view_count:,}" if view_count else "N/A",
+            "video_options": video_options,
+            "audio_options": audio_options
+        })
 
     except Exception as e:
         print("[-] yt-dlp error:", e)
-        return jsonify({"error": f"Failed to parse video link: {str(e)}"}), 400
+        clean_err = str(e).replace("ERROR: ", "")
+        return jsonify({"error": f"Failed to parse video link: {clean_err}"}), 400
 
 
 def run_download_thread(download_id, url, is_audio, height, bitrate, ext, client_ip):
@@ -257,7 +279,6 @@ def run_download_thread(download_id, url, is_audio, height, bitrate, ext, client
     try:
         if is_audio:
             ydl_opts = {
-                **YTDLP_COMMON_OPTS,
                 "format": "bestaudio/best",
                 "outtmpl": output_template,
                 "progress_hooks": [progress_hook],
@@ -270,17 +291,15 @@ def run_download_thread(download_id, url, is_audio, height, bitrate, ext, client
         else:
             format_str = f"bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<={height}]+bestaudio/best[height<={height}]/best"
             ydl_opts = {
-                **YTDLP_COMMON_OPTS,
                 "format": format_str,
                 "outtmpl": output_template,
                 "progress_hooks": [progress_hook],
                 "merge_output_format": "mp4",
             }
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            title = info.get("title", "download")
-            thumbnail = info.get("thumbnail") or ""
+        info = extract_with_client_fallback(url, download=True, base_opts=ydl_opts)
+        title = info.get("title", "download") if info else "download"
+        thumbnail = info.get("thumbnail") if info else ""
 
         final_ext = ext if is_audio else "mp4"
         expected_filename = f"{download_id}.{final_ext}"
