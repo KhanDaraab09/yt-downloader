@@ -1,7 +1,7 @@
 """
 YouTube Video & MP3 Audio Downloader Flask Backend with Protected Admin Dashboard
 =================================================================================
-Powered by Flask, yt-dlp, YouTube oEmbed API, and Bundled Cloud FFmpeg for 1080p & MP3 support.
+Powered by Flask, yt-dlp, Piped + Invidious APIs, and Direct High-Speed Stream Redirection.
 """
 
 import os
@@ -17,14 +17,11 @@ from datetime import datetime
 from flask import Flask, render_template, request, jsonify, send_file, session, redirect, url_for
 import yt_dlp
 
-# Automatic FFmpeg binary detection for cloud servers (Render / Railway)
 try:
     import imageio_ffmpeg
     FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
-    print(f"[+] Found static FFmpeg binary at: {FFMPEG_PATH}")
-except Exception as e:
+except Exception:
     FFMPEG_PATH = None
-    print("[-] Warning: static FFmpeg binary not available:", e)
 
 app = Flask(__name__)
 app.secret_key = "cyber_tube_daraab_khan_secret_key_2026"
@@ -106,8 +103,31 @@ def fetch_youtube_oembed(video_id):
                     "channel": data.get("author_name", "YouTube Channel"),
                     "thumbnail": data.get("thumbnail_url") or f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
                 }
-    except Exception as e:
-        print("[-] oEmbed API log:", e)
+    except Exception:
+        pass
+    return None
+
+
+PIPED_API_INSTANCES = [
+    "https://pipedapi.kavin.rocks",
+    "https://api.piped.yt",
+    "https://pipedapi.adminforge.de"
+]
+
+
+def fetch_piped_streams(video_id):
+    for instance in PIPED_API_INSTANCES:
+        api_url = f"{instance}/streams/{video_id}"
+        try:
+            req = urllib.request.Request(
+                api_url,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                if resp.status == 200:
+                    return json.loads(resp.read().decode("utf-8"))
+        except Exception:
+            continue
     return None
 
 
@@ -221,7 +241,7 @@ def get_video_info():
 
     video_id = extract_youtube_id(url)
     if not video_id:
-        return jsonify({"error": "Invalid YouTube URL format. Please paste a valid YouTube video or Shorts link."}), 400
+        return jsonify({"error": "Invalid YouTube URL format."}), 400
 
     title = "YouTube Video"
     channel = "YouTube Channel"
@@ -244,8 +264,8 @@ def get_video_info():
             duration = info.get("duration", duration)
             v_cnt = info.get("view_count", 0)
             views = f"{v_cnt:,}" if v_cnt else views
-    except Exception as e:
-        print("[-] yt-dlp info log:", e)
+    except Exception:
+        pass
 
     video_options = [
         {"height": 1080, "label": "1080p Full HD", "badge": "HD", "format_type": "video", "available": True},
@@ -306,7 +326,9 @@ def run_download_thread(download_id, url, is_audio, height, bitrate, ext, client
     title = "YouTube Video"
     thumbnail = ""
     final_path = None
+    direct_stream_url = None
 
+    # Method A: Try yt-dlp server download
     try:
         if is_audio:
             ydl_opts = {
@@ -320,12 +342,11 @@ def run_download_thread(download_id, url, is_audio, height, bitrate, ext, client
                 }],
             }
         else:
-            format_str = f"bestvideo[height<={height}]+bestaudio/best[height<={height}]/best"
+            format_str = f"best[height<={height}][ext=mp4]/bestvideo[height<={height}]+bestaudio/best"
             ydl_opts = {
                 "format": format_str,
                 "outtmpl": output_template,
                 "progress_hooks": [progress_hook],
-                "merge_output_format": "mp4",
             }
 
         info = extract_with_client_fallback(url, download=True, base_opts=ydl_opts)
@@ -334,8 +355,7 @@ def run_download_thread(download_id, url, is_audio, height, bitrate, ext, client
             thumbnail = info.get("thumbnail", thumbnail)
 
         final_ext = ext if is_audio else "mp4"
-        expected_filename = f"{download_id}.{final_ext}"
-        target_path = os.path.join(DOWNLOAD_DIR, expected_filename)
+        target_path = os.path.join(DOWNLOAD_DIR, f"{download_id}.{final_ext}")
 
         if os.path.exists(target_path) and os.path.getsize(target_path) > 0:
             final_path = target_path
@@ -349,23 +369,49 @@ def run_download_thread(download_id, url, is_audio, height, bitrate, ext, client
                         final_ext = file.split(".")[-1]
                         download_success = True
                         break
-
     except Exception as e:
-        print(f"[-] Download execution error for {download_id}:", e)
+        print(f"[-] Server download thread error for {download_id}:", e)
+
+    # Method B: Direct stream API fallback if datacenter IP blocks server download
+    if not download_success:
+        video_id = extract_youtube_id(url)
+        if video_id:
+            piped_data = fetch_piped_streams(video_id)
+            if piped_data:
+                title = piped_data.get("title", title)
+                thumbnail = piped_data.get("thumbnailUrl", thumbnail)
+
+                if is_audio:
+                    audio_streams = piped_data.get("audioStreams", [])
+                    if audio_streams:
+                        direct_stream_url = audio_streams[0].get("url")
+                else:
+                    video_streams = piped_data.get("videoStreams", [])
+                    for s in video_streams:
+                        if s.get("quality") == f"{height}p" or s.get("height") == height:
+                            direct_stream_url = s.get("url")
+                            break
+                    if not direct_stream_url and video_streams:
+                        direct_stream_url = video_streams[0].get("url")
+
+                if direct_stream_url:
+                    download_success = True
 
     elapsed_sec = round(time.time() - start_timestamp, 1)
 
-    if download_success and final_path and os.path.exists(final_path):
+    if download_success:
         clean_title = "".join(c for c in title if c.isalnum() or c in (" ", "-", "_")).strip()
+        final_ext = ext if is_audio else "mp4"
         download_filename = f"{clean_title}.{final_ext}"
-        file_size_bytes = os.path.getsize(final_path)
         format_label = f"MP3 ({bitrate}kbps)" if is_audio else f"Video ({height}p)"
+        file_size_bytes = os.path.getsize(final_path) if final_path and os.path.exists(final_path) else 0
 
         with tracker_lock:
             download_tracker[download_id].update({
                 "status": "completed",
                 "percent": 100.0,
                 "file_path": final_path,
+                "direct_url": direct_stream_url,
                 "download_name": download_filename,
                 "status_msg": "Download Ready!"
             })
@@ -378,7 +424,7 @@ def run_download_thread(download_id, url, is_audio, height, bitrate, ext, client
                 "format_label": format_label,
                 "is_audio": is_audio,
                 "download_name": download_filename,
-                "file_size_str": format_bytes(file_size_bytes),
+                "file_size_str": format_bytes(file_size_bytes) if file_size_bytes else "Direct Stream",
                 "file_size_bytes": file_size_bytes,
                 "timestamp": time_str,
                 "duration_sec": f"{elapsed_sec}s",
@@ -391,7 +437,7 @@ def run_download_thread(download_id, url, is_audio, height, bitrate, ext, client
         with tracker_lock:
             download_tracker[download_id].update({
                 "status": "error",
-                "error_msg": "Server download stream failed. Please try again."
+                "error_msg": "Download failed. Please try a different video or try again."
             })
             download_history_logs.append({
                 "id": download_id,
@@ -407,7 +453,7 @@ def run_download_thread(download_id, url, is_audio, height, bitrate, ext, client
                 "duration_sec": f"{elapsed_sec}s",
                 "client_ip": client_ip,
                 "status": "failed",
-                "error_detail": "File not generated on disk"
+                "error_detail": "Stream failed"
             })
             save_persistent_logs(download_history_logs)
 
@@ -465,9 +511,12 @@ def get_file(download_id):
             return jsonify({"error": "File not ready for download"}), 400
         
         file_path = data.get("file_path")
+        direct_url = data.get("direct_url")
         download_name = data.get("download_name", "download.mp4")
 
-    if file_path and os.path.exists(file_path):
+    if direct_url:
+        return redirect(direct_url)
+    elif file_path and os.path.exists(file_path):
         return send_file(file_path, as_attachment=True, download_name=download_name)
     else:
         return jsonify({"error": "File not found on server"}), 404
