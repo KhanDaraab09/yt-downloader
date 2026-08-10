@@ -1,7 +1,7 @@
 """
 YouTube Video & MP3 Audio Downloader Flask Backend with Protected Admin Dashboard
 =================================================================================
-Powered by Flask, yt-dlp, YouTube oEmbed API, and Progressive Format Fallbacks.
+Powered by Flask, yt-dlp, YouTube oEmbed API, and Bundled Cloud FFmpeg for 1080p & MP3 support.
 """
 
 import os
@@ -16,6 +16,15 @@ import urllib.request
 from datetime import datetime
 from flask import Flask, render_template, request, jsonify, send_file, session, redirect, url_for
 import yt_dlp
+
+# Automatic FFmpeg binary detection for cloud servers (Render / Railway)
+try:
+    import imageio_ffmpeg
+    FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
+    print(f"[+] Found static FFmpeg binary at: {FFMPEG_PATH}")
+except Exception as e:
+    FFMPEG_PATH = None
+    print("[-] Warning: static FFmpeg binary not available:", e)
 
 app = Flask(__name__)
 app.secret_key = "cyber_tube_daraab_khan_secret_key_2026"
@@ -115,6 +124,10 @@ def extract_with_client_fallback(url, download=False, base_opts=None):
     if base_opts is None:
         base_opts = {}
 
+    opts_to_use = {**base_opts}
+    if FFMPEG_PATH:
+        opts_to_use["ffmpeg_location"] = FFMPEG_PATH
+
     last_error = None
     for client in CLIENT_FALLBACKS:
         opts = {
@@ -127,7 +140,7 @@ def extract_with_client_fallback(url, download=False, base_opts=None):
                     "player_client": client
                 }
             },
-            **base_opts
+            **opts_to_use
         }
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -307,12 +320,12 @@ def run_download_thread(download_id, url, is_audio, height, bitrate, ext, client
                 }],
             }
         else:
-            # Progressive combined MP4 stream fallback (works on servers without ffmpeg)
-            format_str = f"best[height<={height}][ext=mp4]/bestvideo[height<={height}]+bestaudio/best[height<={height}]/best[ext=mp4]/best"
+            format_str = f"bestvideo[height<={height}]+bestaudio/best[height<={height}]/best"
             ydl_opts = {
                 "format": format_str,
                 "outtmpl": output_template,
                 "progress_hooks": [progress_hook],
+                "merge_output_format": "mp4",
             }
 
         info = extract_with_client_fallback(url, download=True, base_opts=ydl_opts)
@@ -378,7 +391,7 @@ def run_download_thread(download_id, url, is_audio, height, bitrate, ext, client
         with tracker_lock:
             download_tracker[download_id].update({
                 "status": "error",
-                "error_msg": "Server download stream failed. Please try 720p or 360p option."
+                "error_msg": "Server download stream failed. Please try again."
             })
             download_history_logs.append({
                 "id": download_id,
