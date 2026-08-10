@@ -1,7 +1,7 @@
 """
 YouTube Video & MP3 Audio Downloader Flask Backend with Protected Admin Dashboard
 =================================================================================
-Powered by Flask, yt-dlp, Cobalt API, Piped API, and YouTube oEmbed.
+Powered by Flask, Cobalt, Piped, Loader.to, yt-dlp, and YouTube oEmbed.
 """
 
 import os
@@ -109,16 +109,16 @@ def fetch_youtube_oembed(video_id):
 
 
 def get_cobalt_download_url(url, is_audio, height):
-    """Fetches high-speed direct download link from Cobalt API."""
+    """Cobalt API v10 multi-instance download resolver."""
     cobalt_endpoints = [
-        "https://api.cobalt.tools/api/json",
-        "https://co.wuk.sh/api/json"
+        "https://api.cobalt.tools",
+        "https://co.wuk.sh"
     ]
     payload = {
         "url": url,
-        "vQuality": str(height) if not is_audio else "720",
-        "isAudioOnly": is_audio,
-        "aFormat": "mp3" if is_audio else "best"
+        "videoQuality": str(height) if not is_audio else "720",
+        "downloadMode": "audio" if is_audio else "auto",
+        "audioFormat": "mp3" if is_audio else "best"
     }
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
@@ -134,15 +134,14 @@ def get_cobalt_download_url(url, is_audio, height):
                 headers=headers,
                 method="POST"
             )
-            with urllib.request.urlopen(req, timeout=8) as resp:
+            with urllib.request.urlopen(req, timeout=6) as resp:
                 if resp.status in [200, 201]:
                     data = json.loads(resp.read().decode("utf-8"))
-                    direct_url = data.get("url")
-                    if direct_url:
-                        print(f"[+] Cobalt API download link success ({endpoint})")
-                        return direct_url
+                    if data.get("url"):
+                        print(f"[+] Cobalt API success ({endpoint})")
+                        return data["url"]
         except Exception as e:
-            print(f"[-] Cobalt endpoint {endpoint} error:", e)
+            print(f"[-] Cobalt error ({endpoint}):", e)
             continue
     return None
 
@@ -150,11 +149,13 @@ def get_cobalt_download_url(url, is_audio, height):
 PIPED_API_INSTANCES = [
     "https://pipedapi.kavin.rocks",
     "https://api.piped.yt",
-    "https://pipedapi.adminforge.de"
+    "https://pipedapi.adminforge.de",
+    "https://piped-api.garudalinux.org"
 ]
 
 
-def fetch_piped_streams(video_id):
+def fetch_piped_direct_url(video_id, is_audio, height):
+    """Fetches high-speed stream URL directly from Piped API instances."""
     for instance in PIPED_API_INSTANCES:
         api_url = f"{instance}/streams/{video_id}"
         try:
@@ -164,10 +165,26 @@ def fetch_piped_streams(video_id):
             )
             with urllib.request.urlopen(req, timeout=5) as resp:
                 if resp.status == 200:
-                    return json.loads(resp.read().decode("utf-8"))
-        except Exception:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    if is_audio:
+                        audio_streams = data.get("audioStreams", [])
+                        if audio_streams:
+                            return audio_streams[0].get("url"), data.get("title")
+                    else:
+                        video_streams = data.get("videoStreams", [])
+                        # Look for target height or best available MP4 video stream
+                        for s in video_streams:
+                            if s.get("quality") == f"{height}p" or s.get("height") == height:
+                                return s.get("url"), data.get("title")
+                        for s in video_streams:
+                            if s.get("format") == "MPEG-4" or s.get("mimeType", "").startswith("video/mp4"):
+                                return s.get("url"), data.get("title")
+                        if video_streams:
+                            return video_streams[0].get("url"), data.get("title")
+        except Exception as e:
+            print(f"[-] Piped stream error ({instance}):", e)
             continue
-    return None
+    return None, None
 
 
 CLIENT_FALLBACKS = [
@@ -367,17 +384,28 @@ def run_download_thread(download_id, url, is_audio, height, bitrate, ext, client
     final_path = None
     direct_stream_url = None
 
-    # Engine 1: Cobalt High-Speed API
-    direct_stream_url = get_cobalt_download_url(url, is_audio, height)
-    if direct_stream_url:
-        download_success = True
-        video_id = extract_youtube_id(url)
-        oembed = fetch_youtube_oembed(video_id) if video_id else None
-        if oembed:
-            title = oembed["title"]
-            thumbnail = oembed["thumbnail"]
+    video_id = extract_youtube_id(url)
+    oembed = fetch_youtube_oembed(video_id) if video_id else None
+    if oembed:
+        title = oembed["title"]
+        thumbnail = oembed["thumbnail"]
 
-    # Engine 2: yt-dlp Local Server Extraction (if Cobalt busy)
+    # Engine 1: Piped API High-Speed Stream Extraction
+    if video_id:
+        p_url, p_title = fetch_piped_direct_url(video_id, is_audio, height)
+        if p_url:
+            direct_stream_url = p_url
+            title = p_title or title
+            download_success = True
+
+    # Engine 2: Cobalt High-Speed API
+    if not download_success:
+        c_url = get_cobalt_download_url(url, is_audio, height)
+        if c_url:
+            direct_stream_url = c_url
+            download_success = True
+
+    # Engine 3: Local yt-dlp Server Extraction
     if not download_success:
         try:
             if is_audio:
@@ -420,32 +448,7 @@ def run_download_thread(download_id, url, is_audio, height, bitrate, ext, client
                             download_success = True
                             break
         except Exception as e:
-            print(f"[-] yt-dlp server download log for {download_id}:", e)
-
-    # Engine 3: Piped Stream Fallback
-    if not download_success:
-        video_id = extract_youtube_id(url)
-        if video_id:
-            piped_data = fetch_piped_streams(video_id)
-            if piped_data:
-                title = piped_data.get("title", title)
-                thumbnail = piped_data.get("thumbnailUrl", thumbnail)
-
-                if is_audio:
-                    audio_streams = piped_data.get("audioStreams", [])
-                    if audio_streams:
-                        direct_stream_url = audio_streams[0].get("url")
-                else:
-                    video_streams = piped_data.get("videoStreams", [])
-                    for s in video_streams:
-                        if s.get("quality") == f"{height}p" or s.get("height") == height:
-                            direct_stream_url = s.get("url")
-                            break
-                    if not direct_stream_url and video_streams:
-                        direct_stream_url = video_streams[0].get("url")
-
-                if direct_stream_url:
-                    download_success = True
+            print(f"[-] Local yt-dlp download log for {download_id}:", e)
 
     elapsed_sec = round(time.time() - start_timestamp, 1)
 
