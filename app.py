@@ -1,7 +1,7 @@
 """
 YouTube Video & MP3 Audio Downloader Flask Backend with Protected Admin Dashboard
 =================================================================================
-Powered by Flask, yt-dlp, Piped + Invidious APIs, and Direct High-Speed Stream Redirection.
+Powered by Flask, yt-dlp, Cobalt API, Piped API, and YouTube oEmbed.
 """
 
 import os
@@ -105,6 +105,45 @@ def fetch_youtube_oembed(video_id):
                 }
     except Exception:
         pass
+    return None
+
+
+def get_cobalt_download_url(url, is_audio, height):
+    """Fetches high-speed direct download link from Cobalt API."""
+    cobalt_endpoints = [
+        "https://api.cobalt.tools/api/json",
+        "https://co.wuk.sh/api/json"
+    ]
+    payload = {
+        "url": url,
+        "vQuality": str(height) if not is_audio else "720",
+        "isAudioOnly": is_audio,
+        "aFormat": "mp3" if is_audio else "best"
+    }
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Accept": "application/json",
+        "Content-Type": "application/json"
+    }
+
+    for endpoint in cobalt_endpoints:
+        try:
+            req = urllib.request.Request(
+                endpoint,
+                data=json.dumps(payload).encode("utf-8"),
+                headers=headers,
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                if resp.status in [200, 201]:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    direct_url = data.get("url")
+                    if direct_url:
+                        print(f"[+] Cobalt API download link success ({endpoint})")
+                        return direct_url
+        except Exception as e:
+            print(f"[-] Cobalt endpoint {endpoint} error:", e)
+            continue
     return None
 
 
@@ -328,51 +367,62 @@ def run_download_thread(download_id, url, is_audio, height, bitrate, ext, client
     final_path = None
     direct_stream_url = None
 
-    # Method A: Try yt-dlp server download
-    try:
-        if is_audio:
-            ydl_opts = {
-                "format": "bestaudio/best",
-                "outtmpl": output_template,
-                "progress_hooks": [progress_hook],
-                "postprocessors": [{
-                    "key": "FFmpegExtractAudio",
-                    "preferredcodec": "mp3" if ext == "mp3" else "m4a",
-                    "preferredquality": bitrate,
-                }],
-            }
-        else:
-            format_str = f"best[height<={height}][ext=mp4]/bestvideo[height<={height}]+bestaudio/best"
-            ydl_opts = {
-                "format": format_str,
-                "outtmpl": output_template,
-                "progress_hooks": [progress_hook],
-            }
+    # Engine 1: Cobalt High-Speed API
+    direct_stream_url = get_cobalt_download_url(url, is_audio, height)
+    if direct_stream_url:
+        download_success = True
+        video_id = extract_youtube_id(url)
+        oembed = fetch_youtube_oembed(video_id) if video_id else None
+        if oembed:
+            title = oembed["title"]
+            thumbnail = oembed["thumbnail"]
 
-        info = extract_with_client_fallback(url, download=True, base_opts=ydl_opts)
-        if info:
-            title = info.get("title", title)
-            thumbnail = info.get("thumbnail", thumbnail)
+    # Engine 2: yt-dlp Local Server Extraction (if Cobalt busy)
+    if not download_success:
+        try:
+            if is_audio:
+                ydl_opts = {
+                    "format": "bestaudio/best",
+                    "outtmpl": output_template,
+                    "progress_hooks": [progress_hook],
+                    "postprocessors": [{
+                        "key": "FFmpegExtractAudio",
+                        "preferredcodec": "mp3" if ext == "mp3" else "m4a",
+                        "preferredquality": bitrate,
+                    }],
+                }
+            else:
+                format_str = f"best[height<={height}][ext=mp4]/bestvideo[height<={height}]+bestaudio/best"
+                ydl_opts = {
+                    "format": format_str,
+                    "outtmpl": output_template,
+                    "progress_hooks": [progress_hook],
+                }
 
-        final_ext = ext if is_audio else "mp4"
-        target_path = os.path.join(DOWNLOAD_DIR, f"{download_id}.{final_ext}")
+            info = extract_with_client_fallback(url, download=True, base_opts=ydl_opts)
+            if info:
+                title = info.get("title", title)
+                thumbnail = info.get("thumbnail", thumbnail)
 
-        if os.path.exists(target_path) and os.path.getsize(target_path) > 0:
-            final_path = target_path
-            download_success = True
-        else:
-            for file in os.listdir(DOWNLOAD_DIR):
-                if file.startswith(download_id):
-                    fp = os.path.join(DOWNLOAD_DIR, file)
-                    if os.path.getsize(fp) > 0:
-                        final_path = fp
-                        final_ext = file.split(".")[-1]
-                        download_success = True
-                        break
-    except Exception as e:
-        print(f"[-] Server download thread error for {download_id}:", e)
+            final_ext = ext if is_audio else "mp4"
+            target_path = os.path.join(DOWNLOAD_DIR, f"{download_id}.{final_ext}")
 
-    # Method B: Direct stream API fallback if datacenter IP blocks server download
+            if os.path.exists(target_path) and os.path.getsize(target_path) > 0:
+                final_path = target_path
+                download_success = True
+            else:
+                for file in os.listdir(DOWNLOAD_DIR):
+                    if file.startswith(download_id):
+                        fp = os.path.join(DOWNLOAD_DIR, file)
+                        if os.path.getsize(fp) > 0:
+                            final_path = fp
+                            final_ext = file.split(".")[-1]
+                            download_success = True
+                            break
+        except Exception as e:
+            print(f"[-] yt-dlp server download log for {download_id}:", e)
+
+    # Engine 3: Piped Stream Fallback
     if not download_success:
         video_id = extract_youtube_id(url)
         if video_id:
@@ -424,7 +474,7 @@ def run_download_thread(download_id, url, is_audio, height, bitrate, ext, client
                 "format_label": format_label,
                 "is_audio": is_audio,
                 "download_name": download_filename,
-                "file_size_str": format_bytes(file_size_bytes) if file_size_bytes else "Direct Stream",
+                "file_size_str": format_bytes(file_size_bytes) if file_size_bytes else "High-Speed Stream",
                 "file_size_bytes": file_size_bytes,
                 "timestamp": time_str,
                 "duration_sec": f"{elapsed_sec}s",
@@ -437,7 +487,7 @@ def run_download_thread(download_id, url, is_audio, height, bitrate, ext, client
         with tracker_lock:
             download_tracker[download_id].update({
                 "status": "error",
-                "error_msg": "Download failed. Please try a different video or try again."
+                "error_msg": "Download stream unavailable. Please try again."
             })
             download_history_logs.append({
                 "id": download_id,
@@ -453,7 +503,7 @@ def run_download_thread(download_id, url, is_audio, height, bitrate, ext, client
                 "duration_sec": f"{elapsed_sec}s",
                 "client_ip": client_ip,
                 "status": "failed",
-                "error_detail": "Stream failed"
+                "error_detail": "All download engines exhausted"
             })
             save_persistent_logs(download_history_logs)
 
